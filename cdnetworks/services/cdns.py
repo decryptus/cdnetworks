@@ -17,16 +17,6 @@ DEPLOY_TYPES            = ('staging',
 
 LOG                     = logging.getLogger('cdnetworks.cdns')
 
-"""
-try:
-    import http.client as http_client
-except ImportError:
-    # Python 2
-    import httplib as http_client
-
-http_client.HTTPConnection.debuglevel = 1
-"""
-
 
 class CDNetworksCDNS(CDNetworksServiceBase):
     SERVICE_NAME = 'cdns'
@@ -47,7 +37,7 @@ class CDNetworksCDNS(CDNetworksServiceBase):
         if deploy_type not in DEPLOY_TYPES:
             raise ValueError("invalid deploy_type: %r, domain_id: %r" % (deploy_type, domain_id))
 
-    def _mk_api_call(self, path, method = 'get', raw_results = False, **kwargs):
+    def _mk_api_call(self, path, method = 'get', raw_results = False, retry = 1, **kwargs):
         params = None
         data   = None
 
@@ -81,7 +71,14 @@ class CDNetworksCDNS(CDNetworksServiceBase):
                 raise LookupError("invalid response for %r" % path)
 
             item = res[res.keys()[0]]
-            if item.get('resultCode') != 0:
+            if item.get('resultCode') == 102 and retry:
+                self.session.login()
+                return self._mk_api_call(path        = path,
+                                         method      = method,
+                                         raw_results = raw_results,
+                                         retry       = 0,
+                                         **kwargs)
+            elif item.get('resultCode') != 0:
                 raise LookupError("invalid result on %r. (code: %r, result: %r)"
                                   % (path,
                                      item.get('resultCode'),
