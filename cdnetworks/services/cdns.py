@@ -120,7 +120,9 @@ class CDNetworksCDNS(CDNetworksServiceBase):
 
     def get_records(self, domain_id, record_type = None, record_id = None, record_name = None):
         params = {}
-        if record_name:
+        if record_name is not None:
+            if record_name is '':
+                record_name = '@'
             params['name'] = record_name
 
         path   = "domains/%d/records" % domain_id
@@ -136,6 +138,9 @@ class CDNetworksCDNS(CDNetworksServiceBase):
 
     def find_records(self, domain_id, record_type = None, record_id = None, record_name = None):
         r   = []
+
+        if record_name is '':
+            record_name = '@'
 
         res = self.get_records(domain_id, record_type, record_id, record_name)
 
@@ -154,7 +159,7 @@ class CDNetworksCDNS(CDNetworksServiceBase):
                 for record in rrvalue:
                     r.append(record)
 
-        if not record_id and not record_name:
+        if not record_id and record_name is None:
             return r
 
         for record in r:
@@ -162,7 +167,7 @@ class CDNetworksCDNS(CDNetworksServiceBase):
                 r.remove(record)
                 continue
 
-            if record_name and record['name'] != record_name:
+            if record_name is not None and record['name'] != record_name:
                 r.remove(record)
                 continue
 
@@ -224,10 +229,11 @@ class CDNetworksCDNS(CDNetworksServiceBase):
 
             if action == 'create':
                 actions['create'].append(record)
+                continue
             elif action not in ('upsert', 'delete'):
                 raise ValueError("action unknown: %r" % action)
 
-            if not record.get('record_id') and not record.get('host_name'):
+            if not record.get('record_id') and record.get('host_name') is None:
                 raise ValueError("missing record_id and record_name for record: %r" % record)
             elif record.get('record_id'):
                 res = self.find_records(domain_id, record['record_type'], record_id = record['record_id'])
@@ -243,10 +249,15 @@ class CDNetworksCDNS(CDNetworksServiceBase):
                     actions['update'].append(record)
             else:
                 if action == 'upsert':
-                    res = self.find_records(domain_id, record_name = record['host_name'])
-                    if res and len(res) == 1:
-                        actions['delete'].append(res[0])
-                    actions['create'].append(record)
+                    if record['record_type'] == 'NS' \
+                       and record['host_name'] == '@' \
+                       and record['value'].rstrip('.').endswith('.cdnetdns.net'):
+                        continue
+                    else:
+                        res = self.find_records(domain_id, record_name = record['host_name'])
+                        if res and len(res) == 1:
+                            actions['delete'].append(res[0])
+                        actions['create'].append(record)
                 else:
                     raise LookupError("unable to find record: %r" % record)
 
