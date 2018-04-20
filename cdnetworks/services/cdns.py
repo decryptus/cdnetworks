@@ -139,7 +139,7 @@ class CDNetworksCDNS(CDNetworksServiceBase):
 
         return self._mk_api_call(path, method = 'get', **params)
 
-    def find_records(self, domain_id, record_type = None, record_id = None, record_name = None):
+    def find_records(self, domain_id, record_type = None, record_id = None, record_name = None, record_value = None):
         r   = []
 
         if record_name is '':
@@ -162,17 +162,24 @@ class CDNetworksCDNS(CDNetworksServiceBase):
                 for record in rrvalue:
                     r.append(record)
 
-        if not record_id and record_name is None:
+        if not record_id and record_name is None and record_value is None:
             return r
 
         nr = list(r)
 
         for record in nr:
-            if record_id and record['record_id'] != record_id:
+            if record_id \
+               and record['record_id'] != record_id:
                 r.remove(record)
                 continue
 
-            if record_name is not None and record['name'] != record_name:
+            if record_name is not None \
+               and record['name'] != record_name:
+                r.remove(record)
+                continue
+
+            if record_value is not None \
+               and unicode(record['value']) != unicode(record_value):
                 r.remove(record)
                 continue
 
@@ -252,35 +259,32 @@ class CDNetworksCDNS(CDNetworksServiceBase):
                     if not record.get('record_id'):
                         record['record_id'] = res[0]['record_id']
                     actions['update'].append(record)
+            elif action != 'upsert':
+                raise LookupError("unable to find record: %r" % record)
             else:
-                if action == 'upsert':
-                    if record['record_type'] == 'NS':
-                        if record['host_name'] == '@' \
-                           and record['value'].rstrip('.') in DNS_SERVERS:
-                            continue
-                        elif record.get('record_id'):
-                            continue
+                if record['record_type'] in ('NS', 'TXT'):
+                    if record['record_type'] == 'NS' \
+                       and record['host_name'] == '@' \
+                       and record['value'].rstrip('.') in DNS_SERVERS:
+                        continue
+                    elif record.get('record_id'):
+                        actions['update'].append(record)
+                        continue
 
-                        res   = self.find_records(domain_id,
-                                                  record_type = record['record_type'],
-                                                  record_name = record['host_name'])
-                        found = False
-                        for row in res:
-                            if row['value'] == record['value']:
-                                found = True
-                                record['record_id'] = row['record_id']
-                                actions['update'].append(record)
-                                break
-
-                        if not found:
-                            actions['create'].append(record)
+                    res = self.find_records(domain_id,
+                                            record_type = record['record_type'],
+                                            record_name = record['host_name'],
+                                            record_value = record['value'])
+                    if res and len(res) == 1:
+                        record['record_id'] = res[0]['record_id']
+                        actions['update'].append(record)
                     else:
-                        res = self.find_records(domain_id, record_name = record['host_name'])
-                        if res and len(res) == 1:
-                            actions['delete'].append(res[0])
                         actions['create'].append(record)
                 else:
-                    raise LookupError("unable to find record: %r" % record)
+                    res = self.find_records(domain_id, record_name = record['host_name'])
+                    if res and len(res) == 1:
+                        actions['delete'].append(res[0])
+                    actions['create'].append(record)
 
         for action in ('delete', 'update', 'create'):
             for record in actions[action]:
