@@ -165,7 +165,9 @@ class CDNetworksCDNS(CDNetworksServiceBase):
         if not record_id and record_name is None:
             return r
 
-        for record in r:
+        nr = list(r)
+
+        for record in nr:
             if record_id and record['record_id'] != record_id:
                 r.remove(record)
                 continue
