@@ -15,6 +15,9 @@ DEPLOY_TYPE_PRODUCTION  = 'production'
 DEPLOY_TYPES            = ('staging',
                            'production')
 
+DNS_SERVERS             = ('ns1.cdnetdns.net',
+                           'ns2.cdnetdns.net')
+
 LOG                     = logging.getLogger('cdnetworks.cdns')
 
 
@@ -249,10 +252,26 @@ class CDNetworksCDNS(CDNetworksServiceBase):
                     actions['update'].append(record)
             else:
                 if action == 'upsert':
-                    if record['record_type'] == 'NS' \
-                       and record['host_name'] == '@' \
-                       and record['value'].rstrip('.').endswith('.cdnetdns.net'):
-                        continue
+                    if record['record_type'] == 'NS':
+                        if record['host_name'] == '@' \
+                           and record['value'].rstrip('.') in DNS_SERVERS:
+                            continue
+                        elif record.get('record_id'):
+                            continue
+
+                        res   = self.find_records(domain_id,
+                                                  record_type = record['record_type'],
+                                                  record_name = record['host_name'])
+                        found = False
+                        for row in res:
+                            if row['value'] == record['value']:
+                                found = True
+                                record['record_id'] = row['record_id']
+                                actions['update'].append(record)
+                                break
+
+                        if not found:
+                            actions['create'].append(record)
                     else:
                         res = self.find_records(domain_id, record_name = record['host_name'])
                         if res and len(res) == 1:
