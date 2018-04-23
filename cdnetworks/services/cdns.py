@@ -12,11 +12,16 @@ _DEFAULT_API_PATH       = "api/rest/config/cdns"
 DEPLOY_TYPE_STAGING     = 'staging'
 DEPLOY_TYPE_PRODUCTION  = 'production'
 
-DEPLOY_TYPES            = ('staging',
-                           'production')
+DEPLOY_TYPES            = (DEPLOY_TYPE_STAGING,
+                           DEPLOY_TYPE_PRODUCTION)
 
 DNS_SERVERS             = ('ns1.cdnetdns.net',
                            'ns2.cdnetdns.net')
+
+
+VALUE_TYPES             = {'MX': ('data', 'value'),
+                           'RP': ('mailbox_name', 'domain_name'),
+                           'SRV': ('priority', 'weight', 'port', 'target')}
 
 LOG                     = logging.getLogger('cdnetworks.cdns')
 
@@ -39,6 +44,43 @@ class CDNetworksCDNS(CDNetworksServiceBase):
 
         if deploy_type not in DEPLOY_TYPES:
             raise ValueError("invalid deploy_type: %r, domain_id: %r" % (deploy_type, domain_id))
+
+    @staticmethod
+    def _build_uniq_value(record):
+        rr          = record.copy()
+        rr['value'] = unicode(rr.get('value', ''))
+
+        if 'record_type' in rr:
+            xtype       = rr['record_type']
+            rr['value'] = rr['value'].rstrip('.')
+        elif 'type' in rr:
+            xtype       = rr['type']
+        else:
+            return rr['value']
+
+        if xtype not in VALUE_TYPES:
+            return rr['value']
+
+        r = []
+
+        for v in VALUE_TYPES[xtype]:
+            r.append("%s" % (rr.get(v, '')))
+
+        r = ':'.join(r)
+
+        if r.strip(':') == '':
+            return ''
+
+        return unicode(r)
+
+    @staticmethod
+    def _is_frozen_record(record):
+        if record.get('record_type') == 'NS' \
+          and record.get('host_name') == '@' \
+          and record.get('value', '').rstrip('.') in DNS_SERVERS:
+           return True
+
+        return False
 
     def _mk_api_call(self, path, method = 'get', raw_results = False, retry = 1, **kwargs):
         params = None
@@ -139,49 +181,55 @@ class CDNetworksCDNS(CDNetworksServiceBase):
 
         return self._mk_api_call(path, method = 'get', **params)
 
-    def find_records(self, domain_id, record_type = None, record_id = None, record_name = None, record_value = None):
+    def find_records(self, domain_id, record = {}):
         r   = []
+        rr  = record.copy()
 
-        if record_name is '':
-            record_name = '@'
+        if rr.get('host_name') is '':
+            rr['host_name'] = '@'
 
-        res = self.get_records(domain_id, record_type, record_id, record_name)
+        res = self.get_records(domain_id,
+                               rr.get('record_type'),
+                               rr.get('record_id'),
+                               rr.get('host_name'))
 
         if not res or 'records' not in res:
             return r
 
         ref = res['records']
 
-        if record_type:
-            if record_type not in ref:
+        if rr.get('record_type'):
+            if rr['record_type'] not in ref:
                 return r
 
-            r = list(ref[record_type])
+            r = list(ref[rr['record_type']])
         else:
             for rrtype, rrvalue in ref.iteritems():
-                for record in rrvalue:
-                    r.append(record)
+                for rrv in rrvalue:
+                    r.append(rrv)
 
-        if not record_id and record_name is None and record_value is None:
+        value = self._build_uniq_value(rr)
+
+        if not rr.get('record_id') \
+           and rr.get('host_name') is None \
+           and not value:
             return r
 
         nr = list(r)
 
-        for record in nr:
-            if record_id \
-               and record['record_id'] != record_id:
-                r.remove(record)
+        for nrr in nr:
+            if rr.get('record_id') \
+               and long(nrr['record_id']) != long(rr['record_id']):
+                r.remove(nrr)
                 continue
 
-            if record_name is not None \
-               and record['name'] != record_name:
-                r.remove(record)
+            if rr.get('host_name') is not None \
+               and nrr['name'] != rr['host_name']:
+                r.remove(nrr)
                 continue
 
-            if record_value is not None \
-               and unicode(record['value']) != unicode(record_value):
-                r.remove(record)
-                continue
+            if value and self._build_uniq_value(nrr) != value:
+                r.remove(nrr)
 
         return r
 
@@ -227,7 +275,7 @@ class CDNetworksCDNS(CDNetworksServiceBase):
 
         actions = {'create': [],
                    'update': [],
-                   'delete': []}
+                   'delete': {}}
 
         results = {'create': [],
                    'update': [],
@@ -239,22 +287,34 @@ class CDNetworksCDNS(CDNetworksServiceBase):
                 raise KeyError("missing action for record: %r" % record)
             action = record.pop('action')
 
-            if action == 'create':
+            if self._is_frozen_record(record):
+                continue
+            elif action == 'create':
                 actions['create'].append(record)
                 continue
-            elif action not in ('upsert', 'delete'):
+            elif action == 'purge':
+                if not record.get('record_type') or not record.get('host_name'):
+                    raise ValueError("unable to purge, missing record_type or host_name for record: %r" % record)
+
+                res = self.find_records(domain_id,
+                                        record = {'record_type': record['record_type'],
+                                                  'host_name':   record['host_name']})
+                if res:
+                    for row in res:
+                        actions['delete'][str(row['record_id'])] = row
+                continue
+
+            if action not in ('upsert', 'delete'):
                 raise ValueError("action unknown: %r" % action)
 
             if not record.get('record_id') and record.get('host_name') is None:
-                raise ValueError("missing record_id and record_name for record: %r" % record)
-            elif record.get('record_id'):
-                res = self.find_records(domain_id, record['record_type'], record_id = record['record_id'])
+                raise ValueError("missing record_id and host_name for record: %r" % record)
             else:
-                res = self.find_records(domain_id, record['record_type'], record_name = record['host_name'])
+                res = self.find_records(domain_id, record)
 
             if res and len(res) == 1:
                 if action == 'delete':
-                    actions['delete'].append(res[0])
+                    actions['delete'][str(res[0]['record_id'])] = res[0]
                 else:
                     if not record.get('record_id'):
                         record['record_id'] = res[0]['record_id']
@@ -263,37 +323,28 @@ class CDNetworksCDNS(CDNetworksServiceBase):
                 raise LookupError("unable to find record: %r" % record)
             else:
                 if record['record_type'] in ('NS', 'TXT'):
-                    if record['record_type'] == 'NS' \
-                       and record['host_name'] == '@' \
-                       and record['value'].rstrip('.') in DNS_SERVERS:
-                        continue
-                    elif record.get('record_id'):
+                    if record.get('record_id'):
                         actions['update'].append(record)
                         continue
 
-                    res = self.find_records(domain_id,
-                                            record_type = record['record_type'],
-                                            record_name = record['host_name'],
-                                            record_value = record['value'])
+                    res = self.find_records(domain_id, record)
                     if res and len(res) == 1:
                         record['record_id'] = res[0]['record_id']
                         actions['update'].append(record)
                     else:
                         actions['create'].append(record)
                 else:
-                    res = self.find_records(domain_id, record_name = record['host_name'])
+                    res = self.find_records(domain_id, record)
                     if res and len(res) == 1:
-                        actions['delete'].append(res[0])
+                        actions['delete'][str(res[0]['record_id'])] = res[0]
                     actions['create'].append(record)
 
-        for action in ('delete', 'update', 'create'):
+        for record in actions['delete'].itervalues():
+            results['delete'].append(self.delete_record(domain_id, record['type'], record['record_id']))
+
+        for action in ('update', 'create'):
             for record in actions[action]:
-                if action == 'delete':
-                    results['delete'].append(self.delete_record(domain_id, record['type'], record['record_id']))
-                elif action == 'update':
-                    results['update'].append(self.update_records(domain_id, [record]))
-                elif action == 'create':
-                    results['create'].append(self.create_records(domain_id, [record]))
+                results[action].append(getattr(self, "%s_records" % action)(domain_id, [record]))
 
         if deploy_type:
             results['deploy'] = self.deploy(domain_id, deploy_type)
