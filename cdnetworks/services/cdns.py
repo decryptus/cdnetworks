@@ -1,3 +1,25 @@
+# -*- coding: utf-8 -*-
+"""cdnetworks.services.cdns"""
+
+__author__  = "Adrien DELLE CAVE"
+__license__ = """
+    Copyright (C) 2018  fjord-technologies
+
+    This program is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation; either version 2 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License along
+    with this program; if not, write to the Free Software Foundation, Inc.,
+    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA..
+"""
+
 import json
 import logging
 import requests
@@ -18,11 +40,23 @@ DEPLOY_TYPES            = (DEPLOY_TYPE_STAGING,
 DNS_SERVERS             = ('ns1.cdnetdns.net',
                            'ns2.cdnetdns.net')
 
+VALUE_MX_TX             = ('data', 'value')
+VALUE_MX_RX             = ('preference', 'value')
+VALUE_RP                = ('mailbox_name', 'domain_name')
+VALUE_SRV               = ('priority', 'weight', 'port', 'target')
+VALUE_SOA_TX            = ('value',)
+VALUE_SOA_RX            = ('email',)
 
-VALUE_TYPES             = {'MX': ('data', 'value'),
-                           'RP': ('mailbox_name', 'domain_name'),
-                           'SRV': ('priority', 'weight', 'port', 'target'),
-                           'SOA': ('value', 'email', 'serial_number', 'refresh', 'retry', 'expire', 'minmum')}
+VALUE_TYPES             = {'tx':
+                              {'MX':  VALUE_MX_TX,
+                               'RP':  VALUE_RP,
+                               'SRV': VALUE_SRV,
+                               'SOA': VALUE_SOA_TX},
+                           'rx':
+                              {'MX':  VALUE_MX_RX,
+                               'RP':  VALUE_RP,
+                               'SRV': VALUE_SRV,
+                               'SOA': VALUE_SOA_RX}}
 
 LOG                     = logging.getLogger('cdnetworks.cdns')
 
@@ -47,31 +81,27 @@ class CDNetworksCDNS(CDNetworksServiceBase):
             raise ValueError("invalid deploy_type: %r, domain_id: %r" % (deploy_type, domain_id))
 
     @staticmethod
-    def _parse_value(record):
+    def _parse_value(record, xfrom = 'tx'):
+        if xfrom not in VALUE_TYPES:
+            raise ValueError("unable to parse value, invalid from: %r" % xfrom)
+
         rr          = record.copy()
         rr['value'] = unicode(rr.get('value', ''))
 
-        if 'record_type' in rr:
-            xtype       = rr['record_type']
+        if xfrom == 'tx':
+            key_type    = 'record_type'
             rr['value'] = rr['value'].rstrip('.')
-        elif 'type' in rr:
-            xtype       = rr['type']
         else:
-            return rr['value']
+            key_type    = 'type'
 
-        if xtype not in VALUE_TYPES:
-            return rr['value']
+        if key_type in rr and rr[key_type] in VALUE_TYPES[xfrom]:
+            return ["%s" % rr.get(v, '') for v in VALUE_TYPES[xfrom][rr[key_type]]]
 
-        r = []
-
-        for v in VALUE_TYPES[xtype]:
-            r.append("%s" % (rr.get(v, '')))
-
-        return r
+        return rr['value']
 
     @staticmethod
-    def _build_uniq_value(record):
-        value = CDNetworksCDNS._parse_value(record)
+    def _build_uniq_value(record, xfrom = 'tx'):
+        value = CDNetworksCDNS._parse_value(record, xfrom)
         if not isinstance(value, list):
             return value
 
@@ -221,7 +251,6 @@ class CDNetworksCDNS(CDNetworksServiceBase):
                                rr.get('record_type'),
                                rr.get('record_id'),
                                rr.get('host_name'))
-
         if not res or 'records' not in res:
             return r
 
@@ -237,7 +266,7 @@ class CDNetworksCDNS(CDNetworksServiceBase):
                 for rrv in rrvalue:
                     r.append(rrv)
 
-        value = self._build_uniq_value(rr)
+        value = self._build_uniq_value(rr, 'tx')
 
         if not rr.get('record_id') \
            and rr.get('host_name') is None \
@@ -258,7 +287,7 @@ class CDNetworksCDNS(CDNetworksServiceBase):
                 r.remove(nrr)
                 continue
 
-            if value and self._build_uniq_value(nrr) != value:
+            if value and self._build_uniq_value(nrr, 'rx') != value:
                 r.remove(nrr)
 
         return r
