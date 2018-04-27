@@ -21,7 +21,8 @@ DNS_SERVERS             = ('ns1.cdnetdns.net',
 
 VALUE_TYPES             = {'MX': ('data', 'value'),
                            'RP': ('mailbox_name', 'domain_name'),
-                           'SRV': ('priority', 'weight', 'port', 'target')}
+                           'SRV': ('priority', 'weight', 'port', 'target'),
+                           'SOA': ('value', 'email', 'serial_number', 'refresh', 'retry', 'expire', 'minmum')}
 
 LOG                     = logging.getLogger('cdnetworks.cdns')
 
@@ -46,7 +47,7 @@ class CDNetworksCDNS(CDNetworksServiceBase):
             raise ValueError("invalid deploy_type: %r, domain_id: %r" % (deploy_type, domain_id))
 
     @staticmethod
-    def _build_uniq_value(record):
+    def _parse_value(record):
         rr          = record.copy()
         rr['value'] = unicode(rr.get('value', ''))
 
@@ -66,19 +67,45 @@ class CDNetworksCDNS(CDNetworksServiceBase):
         for v in VALUE_TYPES[xtype]:
             r.append("%s" % (rr.get(v, '')))
 
-        r = ':'.join(r)
-
-        if r.strip(':') == '':
-            return ''
-
-        return unicode(r)
+        return r
 
     @staticmethod
-    def _is_frozen_record(record):
+    def _build_uniq_value(record):
+        value = CDNetworksCDNS._parse_value(record)
+        if not isinstance(value, list):
+            return value
+
+        value = ':'.join(value)
+
+        if value.strip(':') == '':
+            return ''
+
+        return unicode(value)
+
+    @staticmethod
+    def _build_soa_record(entry, record):
+        email = entry.get('email')
+
+        if record.get('email') and '@' in record['email']:
+            email = record['email']
+        elif record.get('value') and '@' in record['value']:
+            email = record['value']
+
+        return {'record_id':   entry['record_id'],
+                'value':       email.strip('. '),
+                'record_type': 'SOA',
+                'ttl':         record.get('ttl', entry['ttl'])}
+
+    @staticmethod
+    def _is_frozen_record(action, record):
+        if action in ('create', 'delete') \
+           and record.get('record_type') == 'SOA':
+            return True
+
         if record.get('record_type') == 'NS' \
-          and record.get('host_name') == '@' \
-          and record.get('value', '').rstrip('.') in DNS_SERVERS:
-           return True
+           and record.get('host_name') == '@' \
+           and record.get('value', '').rstrip('.') in DNS_SERVERS:
+            return True
 
         return False
 
@@ -168,7 +195,9 @@ class CDNetworksCDNS(CDNetworksServiceBase):
         if record_name is not None:
             if record_name is '':
                 record_name = '@'
-            params['name'] = record_name
+
+            if record_type != 'SOA':
+                params['name'] = record_name
 
         path   = "domains/%d/records" % domain_id
 
@@ -224,6 +253,7 @@ class CDNetworksCDNS(CDNetworksServiceBase):
                 continue
 
             if rr.get('host_name') is not None \
+               and nrr.get('name') is not None \
                and nrr['name'] != rr['host_name']:
                 r.remove(nrr)
                 continue
@@ -287,7 +317,7 @@ class CDNetworksCDNS(CDNetworksServiceBase):
                 raise KeyError("missing action for record: %r" % record)
             action = record.pop('action')
 
-            if self._is_frozen_record(record):
+            if self._is_frozen_record(action, record):
                 continue
             elif action == 'create':
                 actions['create'].append(record)
@@ -309,20 +339,29 @@ class CDNetworksCDNS(CDNetworksServiceBase):
 
             if not record.get('record_id') and record.get('host_name') is None:
                 raise ValueError("missing record_id and host_name for record: %r" % record)
+            elif record.get('record_type') == 'SOA':
+                res = self.find_records(domain_id, {'record_type': 'SOA'})
             else:
                 res = self.find_records(domain_id, record)
 
             if res and len(res) == 1:
                 if action == 'delete':
                     actions['delete'][str(res[0]['record_id'])] = res[0]
+                    continue
+
+                if not record.get('record_id'):
+                    record['record_id'] = res[0]['record_id']
+
+                if res[0]['type'] == 'SOA':
+                    actions['update'].append(self._build_soa_record(res[0], record))
                 else:
-                    if not record.get('record_id'):
-                        record['record_id'] = res[0]['record_id']
                     actions['update'].append(record)
+            elif record.get('record_type') == 'SOA':
+                continue
             elif action != 'upsert':
                 raise LookupError("unable to find record: %r" % record)
             else:
-                if record['record_type'] in ('NS', 'TXT'):
+                if record.get('record_type') in ('NS', 'TXT'):
                     if record.get('record_id'):
                         actions['update'].append(record)
                         continue
