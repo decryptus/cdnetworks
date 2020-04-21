@@ -22,15 +22,16 @@ __license__ = """
 
 import json
 import logging
-import requests
 import time
+import requests
 
 from cdnetworks.service import CDNetworksServiceBase, SERVICES
-from sonicprobe.libs import urisup
 
 
 _DEFAULT_VERSION        = "v1"
 _DEFAULT_API_PATH       = "api/rest/config/cdns"
+_DEFAULT_DEPLOY_TIMEOUT = 600
+
 DEPLOY_TYPE_STAGING     = 'staging'
 DEPLOY_TYPE_PRODUCTION  = 'production'
 
@@ -48,15 +49,15 @@ VALUE_SOA_TX            = ('value',)
 VALUE_SOA_RX            = ('email',)
 
 VALUE_TYPES             = {'tx':
-                              {'MX':  VALUE_MX_TX,
-                               'RP':  VALUE_RP,
-                               'SRV': VALUE_SRV,
-                               'SOA': VALUE_SOA_TX},
+                           {'MX':  VALUE_MX_TX,
+                            'RP':  VALUE_RP,
+                            'SRV': VALUE_SRV,
+                            'SOA': VALUE_SOA_TX},
                            'rx':
-                              {'MX':  VALUE_MX_RX,
-                               'RP':  VALUE_RP,
-                               'SRV': VALUE_SRV,
-                               'SOA': VALUE_SOA_RX}}
+                           {'MX':  VALUE_MX_RX,
+                            'RP':  VALUE_RP,
+                            'SRV': VALUE_SRV,
+                            'SOA': VALUE_SOA_RX}}
 
 LOG                     = logging.getLogger('cdnetworks.cdns')
 
@@ -139,7 +140,7 @@ class CDNetworksCDNS(CDNetworksServiceBase):
 
         return False
 
-    def _mk_api_call(self, path, method = 'get', raw_results = False, retry = 1, **kwargs):
+    def _mk_api_call(self, path, method = 'get', raw_results = False, retry = 1, timeout = None, **kwargs):
         params = None
         data   = None
 
@@ -160,8 +161,9 @@ class CDNetworksCDNS(CDNetworksServiceBase):
             r = getattr(requests, method)(self._build_uri("/%s/%s/%s" % (self.get_default_api_path(),
                                                                          self.get_default_version(),
                                                                          path)),
-                                          params = params,
-                                          data   = data)
+                                          params  = params,
+                                          data    = data,
+                                          timeout = timeout or self.session.timeout)
             if raw_results:
                 return r
 
@@ -215,8 +217,10 @@ class CDNetworksCDNS(CDNetworksServiceBase):
         if r and r['domains']['domains']:
             return r['domains']['domains'][0]
 
+        return None
+
     def update_domain_ttl(self, domain_id, ttl):
-        return self._mk_api_call("domains/%s/edit",
+        return self._mk_api_call("domains/%s/edit" % domain_id,
                                  method = 'post',
                                  **{'ttl': ttl})
 
@@ -240,7 +244,10 @@ class CDNetworksCDNS(CDNetworksServiceBase):
 
         return self._mk_api_call(path, method = 'get', **params)
 
-    def find_records(self, domain_id, record = {}):
+    def find_records(self, domain_id, record = None):
+        if not record:
+            record = {}
+
         r   = []
         rr  = record.copy()
 
@@ -262,7 +269,7 @@ class CDNetworksCDNS(CDNetworksServiceBase):
 
             r = list(ref[rr['record_type']])
         else:
-            for rrtype, rrvalue in ref.iteritems():
+            for rrvalue in ref.itervalues():
                 for rrv in rrvalue:
                     r.append(rrv)
 
@@ -435,9 +442,10 @@ class CDNetworksCDNS(CDNetworksServiceBase):
 
         return r
 
-    def _api_deploy(self, domain_id):
+    def _api_deploy(self, domain_id, timeout = _DEFAULT_DEPLOY_TIMEOUT):
         return self._mk_api_call("domains/%d/deploy" % domain_id,
-                                 method = 'post')
+                                 method = 'post',
+                                 timeout = timeout)
 
     def deploy(self, domain_id, deploy_type):
         self._valid_deploy_type(deploy_type, domain_id)
