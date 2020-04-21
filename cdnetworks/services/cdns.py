@@ -336,7 +336,7 @@ class CDNetworksCDNS(CDNetworksServiceBase):
 
         return r
 
-    def change_records(self, domain_id, records, deploy_type = None):
+    def change_records(self, domain_id, records, deploy_type = None, force = False):
         self._valid_deploy_type(deploy_type, domain_id)
 
         actions = {'create': [],
@@ -395,7 +395,11 @@ class CDNetworksCDNS(CDNetworksServiceBase):
             elif record.get('record_type') == 'SOA':
                 continue
             elif action != 'upsert':
-                raise LookupError("unable to find record: %r" % record)
+                if force and action == 'delete':
+                    LOG.warning("unable to find record: %r", record)
+                    continue
+                else:
+                    raise LookupError("unable to find record: %r" % record)
             else:
                 if record.get('record_type') in ('NS', 'TXT'):
                     if record.get('record_id'):
