@@ -30,7 +30,7 @@ from cdnetworks.service import SERVICES
 
 
 _DEFAULT_ENDPOINT = "https://openapi.cdnetworks.com"
-_DEFAULT_TIMEOUT  = 30
+_DEFAULT_TIMEOUT  = 60
 
 
 class Session(object):
