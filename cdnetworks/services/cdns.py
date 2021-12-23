@@ -25,6 +25,8 @@ import logging
 import time
 import requests
 
+from six import ensure_text, itervalues
+
 from cdnetworks.service import CDNetworksServiceBase, SERVICES
 
 
@@ -87,7 +89,7 @@ class CDNetworksCDNS(CDNetworksServiceBase):
             raise ValueError("unable to parse value, invalid from: %r" % xfrom)
 
         rr          = record.copy()
-        rr['value'] = unicode(rr.get('value', ''))
+        rr['value'] = ensure_text(rr.get('value', ''))
 
         if xfrom == 'tx':
             key_type    = 'record_type'
@@ -111,7 +113,7 @@ class CDNetworksCDNS(CDNetworksServiceBase):
         if value.strip(':') == '':
             return ''
 
-        return unicode(value)
+        return ensure_text(value)
 
     @staticmethod
     def _build_soa_record(entry, record):
@@ -182,7 +184,8 @@ class CDNetworksCDNS(CDNetworksServiceBase):
                                          raw_results = raw_results,
                                          retry       = 0,
                                          **kwargs)
-            elif item.get('resultCode') != 0:
+
+            if item.get('resultCode') != 0:
                 raise LookupError("invalid result on %r. (code: %r, result: %r)"
                                   % (path,
                                      item.get('resultCode'),
@@ -269,7 +272,7 @@ class CDNetworksCDNS(CDNetworksServiceBase):
 
             r = list(ref[rr['record_type']])
         else:
-            for rrvalue in ref.itervalues():
+            for rrvalue in itervalues(ref):
                 for rrv in rrvalue:
                     r.append(rrv)
 
@@ -284,7 +287,7 @@ class CDNetworksCDNS(CDNetworksServiceBase):
 
         for nrr in nr:
             if rr.get('record_id') \
-               and long(nrr['record_id']) != long(rr['record_id']):
+               and int(nrr['record_id']) != int(rr['record_id']):
                 r.remove(nrr)
                 continue
 
@@ -355,10 +358,12 @@ class CDNetworksCDNS(CDNetworksServiceBase):
 
             if self._is_frozen_record(action, record):
                 continue
-            elif action == 'create':
+
+            if action == 'create':
                 actions['create'].append(record)
                 continue
-            elif action == 'purge':
+
+            if action == 'purge':
                 if not record.get('record_type') or not record.get('host_name'):
                     raise ValueError("unable to purge, missing record_type or host_name for record: %r" % record)
 
@@ -375,7 +380,8 @@ class CDNetworksCDNS(CDNetworksServiceBase):
 
             if not record.get('record_id') and record.get('host_name') is None:
                 raise ValueError("missing record_id and host_name for record: %r" % record)
-            elif record.get('record_type') == 'SOA':
+
+            if record.get('record_type') == 'SOA':
                 res = self.find_records(domain_id, {'record_type': 'SOA'})
             else:
                 res = self.find_records(domain_id, record)
@@ -398,8 +404,7 @@ class CDNetworksCDNS(CDNetworksServiceBase):
                 if force and action == 'delete':
                     LOG.warning("unable to find record: %r", record)
                     continue
-                else:
-                    raise LookupError("unable to find record: %r" % record)
+                raise LookupError("unable to find record: %r" % record)
             else:
                 if record.get('record_type') in ('NS', 'TXT'):
                     if record.get('record_id'):
@@ -418,7 +423,7 @@ class CDNetworksCDNS(CDNetworksServiceBase):
                         actions['delete'][str(res[0]['record_id'])] = res[0]
                     actions['create'].append(record)
 
-        for record in actions['delete'].itervalues():
+        for record in itervalues(actions['delete']):
             results['delete'].append(self.delete_record(domain_id, record['type'], record['record_id']))
 
         for action in ('update', 'create'):
@@ -465,10 +470,12 @@ class CDNetworksCDNS(CDNetworksServiceBase):
                 r[DEPLOY_TYPE_STAGING] = self._api_deploy(domain_id)
                 time.sleep(1)
                 continue
-            elif domain['status_code'] == 1:
+
+            if domain['status_code'] == 1:
                 time.sleep(1)
                 continue
-            elif domain['status_code'] == -2:
+
+            if domain['status_code'] == -2:
                 raise LookupError("unable to deploy to %r: %r" % (DEPLOY_TYPE_STAGING, domain))
 
             if deploy_type == DEPLOY_TYPE_STAGING:
@@ -478,12 +485,15 @@ class CDNetworksCDNS(CDNetworksServiceBase):
                 r[DEPLOY_TYPE_PRODUCTION] = self._api_deploy(domain_id)
                 time.sleep(1)
                 continue
-            elif domain['status_code'] == 3:
+
+            if domain['status_code'] == 3:
                 time.sleep(1)
                 continue
-            elif domain['status_code'] == -4:
+
+            if domain['status_code'] == -4:
                 raise LookupError("unable to deploy to %r: %r" % (DEPLOY_TYPE_PRODUCTION, domain))
-            elif domain['status_code'] == 4:
+
+            if domain['status_code'] == 4:
                 break
 
         return r

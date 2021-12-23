@@ -1,2 +1,3 @@
 requests
-sonicprobe
+six>=1.13.0
+sonicprobe>=0.3.43
