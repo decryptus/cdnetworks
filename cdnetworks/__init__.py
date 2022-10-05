@@ -1,18 +1,17 @@
+# -*- coding: utf-8 -*-
+# Copyright (C) 2018-2022 Adrien Delle Cave
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""cdnetworks"""
+
+
 import logging
 
-from cdnetworks.session import Session
+from cdnetworks.services import *
+from cdnetworks.service import SERVICES
 
-DEFAULT_SESSION = None
-
-def setup_default_session(**kwargs):
-    global DEFAULT_SESSION
-    DEFAULT_SESSION = Session(**kwargs)
-
-def _get_default_session():
-    if DEFAULT_SESSION is None:
-        setup_default_session()
-
-    return DEFAULT_SESSION
 
 def service(name, **kwargs):
-    return _get_default_session(**kwargs).service(name)
+    if name not in SERVICES:
+        raise ValueError("invalid service: %r" % name)
+
+    return SERVICES[name].init(**kwargs)

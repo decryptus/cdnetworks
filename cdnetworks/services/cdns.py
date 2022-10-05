@@ -1,37 +1,17 @@
 # -*- coding: utf-8 -*-
+# Copyright (C) 2018-2022 Adrien Delle Cave
+# SPDX-License-Identifier: GPL-3.0-or-later
 """cdnetworks.services.cdns"""
 
-__author__  = "Adrien DELLE CAVE"
-__license__ = """
-    Copyright (C) 2018  fjord-technologies
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License along
-    with this program; if not, write to the Free Software Foundation, Inc.,
-    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA..
-"""
-
-import json
 import logging
-import time
-import requests
 
 from six import ensure_text, itervalues
 
 from cdnetworks.service import CDNetworksServiceBase, SERVICES
 
 
-_DEFAULT_VERSION        = "v1"
-_DEFAULT_API_PATH       = "api/rest/config/cdns"
+_DEFAULT_API_PATH       = "api/clouddns/zones"
 _DEFAULT_DEPLOY_TIMEOUT = 600
 
 DEPLOY_TYPE_STAGING     = 'staging'
@@ -68,49 +48,34 @@ class CDNetworksCDNS(CDNetworksServiceBase):
     SERVICE_NAME = 'cdns'
 
     @staticmethod
-    def get_default_version():
-        return _DEFAULT_VERSION
-
-    @staticmethod
     def get_default_api_path():
         return _DEFAULT_API_PATH
-
-    @staticmethod
-    def _valid_deploy_type(deploy_type, domain_id):
-        if not deploy_type:
-            return
-
-        if deploy_type not in DEPLOY_TYPES:
-            raise ValueError("invalid deploy_type: %r, domain_id: %r" % (deploy_type, domain_id))
 
     @staticmethod
     def _parse_value(record, xfrom = 'tx'):
         if xfrom not in VALUE_TYPES:
             raise ValueError("unable to parse value, invalid from: %r" % xfrom)
 
-        rr          = record.copy()
+        rr = record.copy()
         rr['value'] = ensure_text(rr.get('value', ''))
 
         if xfrom == 'tx':
-            key_type    = 'record_type'
             rr['value'] = rr['value'].rstrip('.')
-        else:
-            key_type    = 'type'
 
-        if key_type in rr and rr[key_type] in VALUE_TYPES[xfrom]:
-            return ["%s" % rr.get(v, '') for v in VALUE_TYPES[xfrom][rr[key_type]]]
+        if 'type' in rr and rr['type'] in VALUE_TYPES[xfrom]:
+            return ["%s" % rr.get(v, '') for v in VALUE_TYPES[xfrom][rr['type']]]
 
         return rr['value']
 
     @staticmethod
-    def _build_uniq_value(record, xfrom = 'tx'):
+    def _build_uniq_value(record, xfrom = 'tx', sep = ':'):
         value = CDNetworksCDNS._parse_value(record, xfrom)
         if not isinstance(value, list):
             return value
 
-        value = ':'.join(value)
+        value = sep.join(value)
 
-        if value.strip(':') == '':
+        if value.strip(sep) == '':
             return ''
 
         return ensure_text(value)
@@ -124,153 +89,98 @@ class CDNetworksCDNS(CDNetworksServiceBase):
         elif record.get('value') and '@' in record['value']:
             email = record['value']
 
-        return {'record_id':   entry['record_id'],
-                'value':       email.strip('. '),
-                'record_type': 'SOA',
-                'ttl':         record.get('ttl', entry['ttl'])}
+        return {'recordId': entry['recordId'],
+                'value': email.strip('. '),
+                'type': 'SOA',
+                'ttl': record.get('ttl', entry['ttl'])}
 
     @staticmethod
     def _is_frozen_record(action, record):
         if action in ('create', 'delete') \
-           and record.get('record_type') == 'SOA':
+           and record.get('type') == 'SOA':
             return True
 
-        if record.get('record_type') == 'NS' \
-           and record.get('host_name') == '@' \
+        if record.get('type') == 'NS' \
+           and record.get('hostName') == '@' \
            and record.get('value', '').rstrip('.') in DNS_SERVERS:
             return True
 
         return False
 
-    def _mk_api_call(self, path, method = 'get', raw_results = False, retry = 1, timeout = None, **kwargs):
-        params = None
-        data   = None
-
-        if method == 'post':
-            data = kwargs
-            data['output'] = 'json'
-            data['sessionToken'] = self.session.token
-            data['submit_type'] = method.upper()
-        else:
-            params = kwargs
-            params['output'] = 'json'
-            params['sessionToken'] = self.session.token
-            params['submit_type'] = method.upper()
-
-        r = None
-
-        try:
-            r = getattr(requests, method)(self._build_uri("/%s/%s/%s" % (self.get_default_api_path(),
-                                                                         self.get_default_version(),
-                                                                         path)),
-                                          params  = params,
-                                          data    = data,
-                                          timeout = timeout or self.session.timeout)
-            if raw_results:
-                return r
-
-            if not r or r.status_code != 200:
-                raise LookupError("unable to get %r" % path)
-
-            res  = r.json()
-            if not res:
-                raise LookupError("invalid response for %r" % path)
-
-            item = res[res.keys()[0]]
-            if item.get('resultCode') == 102 and retry:
-                self.session.login()
-                return self._mk_api_call(path        = path,
-                                         method      = method,
-                                         raw_results = raw_results,
-                                         retry       = 0,
-                                         **kwargs)
-
-            if item.get('resultCode') != 0:
-                raise LookupError("invalid result on %r. (code: %r, result: %r)"
-                                  % (path,
-                                     item.get('resultCode'),
-                                     item.get('resultMsg')))
-            return item
-        except Exception:
-            raise
-        finally:
-            if r:
-                r.close()
-
-    def list_domains(self, page = 1, limit = 25, name = None):
-        params = {'page':  page,
-                  'limit': limit}
+    def list_zones(self, page = 1, page_size = 25, name = None):
+        params = {'page': page,
+                  'pageSize': page_size}
 
         if name:
             params['name'] = name
 
-        return self._mk_api_call("domains/list", method = 'get', **params)
+        return self.mk_api_call(params = params)
 
-    def search_domains(self, name, page = 1, limit = 25):
-        return self._mk_api_call("domains/list",
-                                 method = 'get',
-                                 **{'name': name,
-                                    'page': page,
-                                    'limit': limit})
+    def search_zones(self, name, page = 1, page_size = 25):
+        return self.mk_api_call(params = {'name': name,
+                                          'page': page,
+                                          'pageSsize': page_size})
 
-    def get_domain_by_id(self, domain_id):
-        r = self._mk_api_call("domains/%d/list" % domain_id,
-                              method = 'get')
+    def get_zone_by_id(self, zone_id):
+        r = self.mk_api_call("%s" % zone_id,
+                             method = 'get')
 
-        if r and r['domains']['domains']:
-            return r['domains']['domains'][0]
+        if r and r.get('data'):
+            return r['data']
 
         return None
 
-    def update_domain_ttl(self, domain_id, ttl):
-        return self._mk_api_call("domains/%s/edit" % domain_id,
-                                 method = 'post',
-                                 **{'ttl': ttl})
+    def update_zone_ttl(self, zone_id, ttl):
+        return self.mk_api_call("%s" % zone_id,
+                                method = 'put',
+                                data = {'ttl': ttl})
 
-    def get_records(self, domain_id, record_type = None, record_id = None, record_name = None):
+    def get_records(self, zone_id, record_type = None, record_id = None, host_name = None):
         params = {}
-        if record_name is not None:
-            if record_name is '':
-                record_name = '@'
+        path = "%s/records" % zone_id
 
-            if record_type != 'SOA':
-                params['name'] = record_name
+        if record_id:
+            path += "/%s" % record_id
 
-        path   = "domains/%d/records" % domain_id
+        if host_name is not None:
+            if host_name == '':
+                host_name = '@'
+
+            params['hostName'] = host_name
 
         if record_type:
-            path += "/%s" % record_type
-            if record_id:
-                path += "/%d" % record_id
+            params['types'] = record_type
 
-        path  += "/list"
+        return self.mk_api_call(path, method = 'get', params = params)
 
-        return self._mk_api_call(path, method = 'get', **params)
-
-    def find_records(self, domain_id, record = None):
+    def find_records(self, zone_id, record = None):
         if not record:
             record = {}
 
         r   = []
         rr  = record.copy()
 
-        if rr.get('host_name') is '':
-            rr['host_name'] = '@'
+        if rr.get('hostName') == '':
+            rr['hostName'] = '@'
 
-        res = self.get_records(domain_id,
-                               rr.get('record_type'),
-                               rr.get('record_id'),
-                               rr.get('host_name'))
-        if not res or 'records' not in res:
+        res = self.get_records(zone_id,
+                               rr.get('type'),
+                               rr.get('recordId'),
+                               rr.get('hostName'))
+
+        if not res or 'data' not in res:
             return r
 
-        ref = res['records']
+        ref = res['data']
 
-        if rr.get('record_type'):
-            if rr['record_type'] not in ref:
+        if rr.get('type'):
+            if ref.get('type') == rr['type']:
+                return [ref]
+
+            if rr['type'] not in ref:
                 return r
 
-            r = list(ref[rr['record_type']])
+            r = list(ref[rr['type']])
         else:
             for rrvalue in itervalues(ref):
                 for rrv in rrvalue:
@@ -278,22 +188,22 @@ class CDNetworksCDNS(CDNetworksServiceBase):
 
         value = self._build_uniq_value(rr, 'tx')
 
-        if not rr.get('record_id') \
-           and rr.get('host_name') is None \
+        if not rr.get('recordId') \
+           and rr.get('hostName') is None \
            and not value:
             return r
 
         nr = list(r)
 
         for nrr in nr:
-            if rr.get('record_id') \
-               and int(nrr['record_id']) != int(rr['record_id']):
+            if rr.get('recordId') \
+               and int(nrr['recordId']) != int(rr['recordId']):
                 r.remove(nrr)
                 continue
 
-            if rr.get('host_name') is not None \
-               and nrr.get('name') is not None \
-               and nrr['name'] != rr['host_name']:
+            if rr.get('hostName') is not None \
+               and nrr.get('hostName') is not None \
+               and nrr['hostName'] != rr['hostName']:
                 r.remove(nrr)
                 continue
 
@@ -302,46 +212,46 @@ class CDNetworksCDNS(CDNetworksServiceBase):
 
         return r
 
-    def create_records(self, domain_id, records, deploy_type = None):
-        self._valid_deploy_type(deploy_type, domain_id)
+    def create_records(self, zone_id, records, deployment = False):
+        r = {'result': None,
+             'deploy': None}
 
-        r    = {'result': None,
-                'deploy': None}
+        for record in records:
+            if record['type'] in ('RP', 'SRV') and not record.get('value'):
+                record['value'] = self._build_uniq_value(record, 'rx', ' ')
 
-        r['result'] = self._mk_api_call("domains/%d/records/add" % domain_id,
-                                        method = 'post',
-                                        **{'records': json.dumps(records)})
+        r['result'] = self.mk_api_call("%s/records" % zone_id,
+                                       method = 'post',
+                                       data = records)
 
-        if deploy_type:
-            r['deploy'] = self.deploy(domain_id, deploy_type)
-
-        return r
-
-    def update_records(self, domain_id, records, record_type = None, record_id = None, deploy_type = None):
-        self._valid_deploy_type(deploy_type, domain_id)
-
-        r    = {'result': None,
-                'deploy': None}
-
-        path  = "domains/%d/records" % domain_id
-
-        if record_type and record_id:
-            path += "/%s/%d" % (record_type, record_id)
-
-        path += "/edit"
-
-        r['result'] = self._mk_api_call(path,
-                                        method = 'post',
-                                        **{'records': json.dumps(records)})
-
-        if deploy_type:
-            r['deploy'] = self.deploy(domain_id, deploy_type)
+        if deployment:
+            r['deploy'] = self.deployment(zone_id, deployment)
 
         return r
 
-    def change_records(self, domain_id, records, deploy_type = None, force = False):
-        self._valid_deploy_type(deploy_type, domain_id)
+    def update_records(self, zone_id, records, record_id = None, deployment = False):
+        r = {'result': None,
+             'deploy': None}
 
+        path = "%s/records" % zone_id
+
+        if record_id:
+            path += "/%s" % record_id
+
+        for record in records:
+            if record['type'] in ('RP', 'SRV') and not record.get('value'):
+                record['value'] = self._build_uniq_value(record, 'rx', ' ')
+
+        r['result'] = self.mk_api_call(path,
+                                       method = 'put',
+                                       data = records)
+
+        if deployment:
+            r['deploy'] = self.deployment(zone_id, deployment)
+
+        return r
+
+    def change_records(self, zone_id, records, deployment = False, force = False):
         actions = {'create': [],
                    'update': [],
                    'delete': {}}
@@ -354,6 +264,7 @@ class CDNetworksCDNS(CDNetworksServiceBase):
         for record in records:
             if 'action' not in record:
                 raise KeyError("missing action for record: %r" % record)
+
             action = record.pop('action')
 
             if self._is_frozen_record(action, record):
@@ -364,41 +275,41 @@ class CDNetworksCDNS(CDNetworksServiceBase):
                 continue
 
             if action == 'purge':
-                if not record.get('record_type') or not record.get('host_name'):
-                    raise ValueError("unable to purge, missing record_type or host_name for record: %r" % record)
+                if not record.get('type') or not record.get('hostName'):
+                    raise ValueError("unable to purge, missing type or hostName for record: %r" % record)
 
-                res = self.find_records(domain_id,
-                                        record = {'record_type': record['record_type'],
-                                                  'host_name':   record['host_name']})
+                res = self.find_records(zone_id,
+                                        record = {'type': record['type'],
+                                                  'hostName': record['hostName']})
                 if res:
                     for row in res:
-                        actions['delete'][str(row['record_id'])] = row
+                        actions['delete'][str(row['recordId'])] = row
                 continue
 
             if action not in ('upsert', 'delete'):
                 raise ValueError("action unknown: %r" % action)
 
-            if not record.get('record_id') and record.get('host_name') is None:
-                raise ValueError("missing record_id and host_name for record: %r" % record)
+            if not record.get('recordId') and record.get('hostName') is None:
+                raise ValueError("missing recordId and hostName for record: %r" % record)
 
-            if record.get('record_type') == 'SOA':
-                res = self.find_records(domain_id, {'record_type': 'SOA'})
+            if record.get('type') == 'SOA':
+                res = self.find_records(zone_id, {'type': 'SOA'})
             else:
-                res = self.find_records(domain_id, record)
+                res = self.find_records(zone_id, record)
 
             if res and len(res) == 1:
                 if action == 'delete':
-                    actions['delete'][str(res[0]['record_id'])] = res[0]
+                    actions['delete'][str(res[0]['recordId'])] = res[0]
                     continue
 
-                if not record.get('record_id'):
-                    record['record_id'] = res[0]['record_id']
+                if not record.get('recordId'):
+                    record['recordId'] = res[0]['recordId']
 
                 if res[0]['type'] == 'SOA':
                     actions['update'].append(self._build_soa_record(res[0], record))
                 else:
                     actions['update'].append(record)
-            elif record.get('record_type') == 'SOA':
+            elif record.get('type') == 'SOA':
                 continue
             elif action != 'upsert':
                 if force and action == 'delete':
@@ -406,97 +317,79 @@ class CDNetworksCDNS(CDNetworksServiceBase):
                     continue
                 raise LookupError("unable to find record: %r" % record)
             else:
-                if record.get('record_type') in ('NS', 'TXT'):
-                    if record.get('record_id'):
+                if record.get('type') in ('NS', 'TXT'):
+                    if record.get('recordId'):
                         actions['update'].append(record)
                         continue
 
-                    res = self.find_records(domain_id, record)
+                    res = self.find_records(zone_id, record)
                     if res and len(res) == 1:
-                        record['record_id'] = res[0]['record_id']
+                        record['recordId'] = res[0]['recordId']
                         actions['update'].append(record)
                     else:
                         actions['create'].append(record)
                 else:
-                    res = self.find_records(domain_id, record)
+                    res = self.find_records(zone_id, record)
                     if res and len(res) == 1:
-                        actions['delete'][str(res[0]['record_id'])] = res[0]
+                        actions['delete'][str(res[0]['recordId'])] = res[0]
                     actions['create'].append(record)
 
         for record in itervalues(actions['delete']):
-            results['delete'].append(self.delete_record(domain_id, record['type'], record['record_id']))
+            results['delete'].append(self.delete_record(zone_id, record['recordId']))
 
         for action in ('update', 'create'):
             for record in actions[action]:
-                results[action].append(getattr(self, "%s_records" % action)(domain_id, [record]))
+                results[action].append(getattr(self, "%s_records" % action)(zone_id, [record]))
 
-        if deploy_type:
-            results['deploy'] = self.deploy(domain_id, deploy_type)
+        if deployment:
+            results['deploy'] = self.deployment(zone_id, deployment)
 
         return results
 
-    def delete_record(self, domain_id, record_type, record_id, deploy_type = None):
-        self._valid_deploy_type(deploy_type, domain_id)
+    def delete_record(self, zone_id, record_id, deployment = None):
+        r = {'result': None,
+             'deploy': None}
 
-        r    = {'result': None,
-                'deploy': None}
+        path = "%s/records/%s" % (zone_id, record_id)
 
-        path = "domains/%s/records/%s/%d/delete" % (domain_id, record_type, record_id)
+        r['result'] = self.mk_api_call(path,
+                                       method = 'delete')
 
-        r['result'] = self._mk_api_call(path,
-                                        method = 'post')
-
-        if deploy_type:
-            r['deploy'] = self.deploy(domain_id, deploy_type)
+        if deployment:
+            r['deploy'] = self.deployment(zone_id, deployment)
 
         return r
 
-    def _api_deploy(self, domain_id, timeout = _DEFAULT_DEPLOY_TIMEOUT):
-        return self._mk_api_call("domains/%d/deploy" % domain_id,
-                                 method = 'post',
-                                 timeout = timeout)
+    def _mk_api_call_deployment(self, zone_id, timeout):
+        res = self.mk_api_call("%s/deployment" % zone_id,
+                               method = 'post',
+                               timeout = timeout)
 
-    def deploy(self, domain_id, deploy_type):
-        self._valid_deploy_type(deploy_type, domain_id)
+        if res and res.get('data') and res['data'].get('phase'):
+            return res
 
-        r = dict(zip(DEPLOY_TYPES, len(DEPLOY_TYPES) * ['']))
+        raise ValueError("unable to deploy to %r" % res)
 
-        while True:
-            domain = self.get_domain_by_id(domain_id)
-            if not domain:
-                raise LookupError("unable to find domain: %r" % domain_id)
+    def deployment(self, zone_id, deployment = DEPLOY_TYPE_STAGING, timeout = _DEFAULT_DEPLOY_TIMEOUT):
+        if deployment not in DEPLOY_TYPES:
+            raise ValueError("invalid deployment type: %r" % deployment)
 
-            if domain['status_code'] == 0:
-                r[DEPLOY_TYPE_STAGING] = self._api_deploy(domain_id)
-                time.sleep(1)
-                continue
+        zone = self.get_zone_by_id(zone_id)
+        if not zone:
+            raise LookupError("unable to find zone: %r" % zone_id)
 
-            if domain['status_code'] == 1:
-                time.sleep(1)
-                continue
+        if deployment == DEPLOY_TYPE_STAGING:
+            return self._mk_api_call_deployment(zone_id, timeout)
 
-            if domain['status_code'] == -2:
-                raise LookupError("unable to deploy to %r: %r" % (DEPLOY_TYPE_STAGING, domain))
+        res = self._mk_api_call_deployment(zone_id, timeout)
+        if res['data']['phase'] == 'In production':
+            return True
 
-            if deploy_type == DEPLOY_TYPE_STAGING:
-                break
+        if res['data']['phase'] == 'Sent to Stage':
+            return self.deployment(zone_id, deployment, timeout)
 
-            if domain['status_code'] == 2:
-                r[DEPLOY_TYPE_PRODUCTION] = self._api_deploy(domain_id)
-                time.sleep(1)
-                continue
+        raise LookupError("unable to deploy, error unknown, zone: %r" % zone['data']['name'])
 
-            if domain['status_code'] == 3:
-                time.sleep(1)
-                continue
-
-            if domain['status_code'] == -4:
-                raise LookupError("unable to deploy to %r: %r" % (DEPLOY_TYPE_PRODUCTION, domain))
-
-            if domain['status_code'] == 4:
-                break
-
-        return r
 
 if __name__ != "__main__":
     def _start():
